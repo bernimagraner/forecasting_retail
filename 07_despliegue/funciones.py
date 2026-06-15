@@ -23,31 +23,20 @@ import pickle
 
 
 def calidad_datos(x, num=None):
-    # Modificar tipos
-    temp = x.astype({"month": "O", "wday": "O"})
-    # Imputar nulos
-    temp.loc[x["event_name_1"].isna(), "event_name_1"] = "Sin_evento"
+    temp = x.astype({"month": "O", "wday": "O"}).copy()
+    temp.loc[temp["event_name_1"].isna(), "event_name_1"] = "Sin_evento"
 
-    def imputar_moda(registros):
-        # Calcula la moda del precio en ese grupo semana-producto
-        moda_serie = registros.sell_price.mode()
-        if not moda_serie.empty:
-            moda = moda_serie.iloc[0]
-        else:
-            # Si no hay moda en la semana, calcula la moda a nivel de producto
-            item_id = registros.item_id.iloc[0]
-            if num is not None:
-                moda_producto = num[num.item_id == item_id].sell_price.mode()
-                if not moda_producto.empty:
-                    moda = moda_producto.iloc[0]
-                else:
-                    moda = np.nan  # Si tampoco hay moda a nivel producto, deja nulo
-            else:
-                moda = np.nan
-        registros.loc[registros.sell_price.isna(), "sell_price"] = moda
-        return registros
+    moda_por_item = temp.groupby("item_id")["sell_price"].agg(
+        lambda s: s.mode().iloc[0] if not s.mode().empty else np.nan
+    )
 
-    temp = temp.groupby("item_id", group_keys=False).apply(imputar_moda)
+    if num is not None:
+        moda_num = num.groupby("item_id")["sell_price"].agg(
+            lambda s: s.mode().iloc[0] if not s.mode().empty else np.nan
+        )
+        moda_por_item = moda_por_item.fillna(moda_num)
+
+    temp["sell_price"] = temp["sell_price"].fillna(temp["item_id"].map(moda_por_item))
     return temp
 
 
@@ -408,7 +397,7 @@ def lanzar_ejecucion(df):
     with open(ruta_modelos, mode="rb") as file:
         lista_modelos = pickle.load(file)
 
-    predicciones_df = pd.DataFrame(columns=["date", "producto", "ventas", "prediccion"])
+    predicciones_lista = []
 
     for cada in range(0, len(lista_modelos)):
 
@@ -439,13 +428,12 @@ def lanzar_ejecucion(df):
             }
         )
 
-        predicciones["prediccion"] = predicciones.prediccion.astype("int")
+        predicciones["prediccion"] = predicciones.prediccion.round().astype("int64")
+        predicciones_lista.append(predicciones)
 
-        predicciones_df = pd.concat([predicciones_df, predicciones])
-
-    predicciones_df = predicciones_df.loc[
-        predicciones_df.index == predicciones_df.index.min()
-    ]
+    predicciones_df = pd.concat(predicciones_lista, ignore_index=True)
+    fecha_prediccion = predicciones_df["date"].min()
+    predicciones_df = predicciones_df.loc[predicciones_df["date"] == fecha_prediccion]
     return predicciones_df
 
 
@@ -478,6 +466,8 @@ def forecast_recursivo(x):
     Y así hasta que finaliza 8 ciclos para predecir la semana que queremos.
     """
 
+    x = x.copy()
+
     for cada in range(0, 8):
         paso1_df = calidad_datos(x)
         paso2_df = crear_variables(paso1_df)
@@ -487,13 +477,16 @@ def forecast_recursivo(x):
         f["store_id"] = f.producto.str[:4]
         f["item_id"] = f.producto.str[5:]
 
-        # Actualiza el dato de ventas con la predicción
-        x.loc[
-            (x.index.isin(f.date))
-            & (x.store_id.isin(f.store_id))
-            & (x.item_id.isin(f.item_id)),
-            "ventas",
-        ] = f.prediccion
+        # Actualiza ventas fila a fila (date + store_id + item_id) para no mezclar productos
+        f_update = f[["date", "store_id", "item_id", "prediccion"]].copy()
+        f_update["prediccion"] = f_update["prediccion"].astype("int64")
+        for _, row in f_update.iterrows():
+            x.loc[
+                (x.index == row["date"])
+                & (x.store_id == row["store_id"])
+                & (x.item_id == row["item_id"]),
+                "ventas",
+            ] = row["prediccion"]
 
         # Elimina el día más antiguo de x
         x = x.loc[x.index != x.index.min()]

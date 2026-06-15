@@ -7,7 +7,11 @@ from funciones import *
 
 # Cargar los datos
 df = pd.read_csv(
-    "./DatosParaProduccion.csv", sep=";", parse_dates=["date"], index_col="date"
+    "./DatosParaProduccion.csv",
+    sep=";",
+    parse_dates=["date"],
+    index_col="date",
+    dayfirst=True,
 )
 
 # Seleccionar solo las que se han usado
